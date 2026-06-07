@@ -1,0 +1,13 @@
+node_modules
+.next
+.wwebjs_cache
+.git.broken-worktree-pointer
+.env
+.env.local
+*.log
+.DS_Store
+tsconfig.tsbuildinfo
+prisma/dev.db*
+
+# local JSON stores
+data/

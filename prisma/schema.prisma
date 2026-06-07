@@ -1,0 +1,257 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Account {
+  id         String       @id @default(cuid())
+  name       String
+  createdAt  DateTime     @default(now())
+  waAccounts WAAccount[]
+  pricing    PricingStrategy[]
+  suppliers  Supplier[]
+}
+
+model WAAccount {
+  id                 String   @id @default(cuid())
+  account            Account  @relation(fields: [accountId], references: [id])
+  accountId          String
+  phoneNumberId      String   @unique
+  displayPhone       String
+  accessTokenEnc     String
+  webhookVerifyToken String
+  createdAt          DateTime @default(now())
+  customers          Customer[]
+}
+
+model Customer {
+  id            String         @id @default(cuid())
+  waAccount     WAAccount      @relation(fields: [waAccountId], references: [id])
+  waAccountId   String
+  waUserId      String
+  displayName   String?
+  locale        String?
+  country       String?
+  tags          String[]       @default([])
+  attrsJson     Json           @default("{}")
+  conversations Conversation[]
+  createdAt     DateTime       @default(now())
+
+  @@unique([waAccountId, waUserId])
+}
+
+enum ConvStatus {
+  NEW
+  DISCOVERY
+  SELECTING
+  QUOTING
+  NEGOTIATING
+  CLOSING
+  FULFILLING
+  SHIPPED
+  DONE
+  LOST
+}
+
+enum AiMode {
+  OFF
+  SUGGEST
+  AUTO
+}
+
+model Conversation {
+  id            String     @id @default(cuid())
+  customer      Customer   @relation(fields: [customerId], references: [id])
+  customerId    String
+  status        ConvStatus @default(NEW)
+  aiMode        AiMode     @default(SUGGEST)
+  lastMessageAt DateTime   @default(now())
+  messages      Message[]
+  inquiries     Inquiry[]
+  quotes        Quote[]
+  orders        Order[]
+  createdAt     DateTime   @default(now())
+}
+
+enum MsgDir {
+  IN
+  OUT
+}
+
+enum MsgSender {
+  CUSTOMER
+  SALES
+  AI
+  SYSTEM
+}
+
+enum MsgType {
+  TEXT
+  IMAGE
+  IMAGE_GROUP
+  DOC
+  TEMPLATE
+  QUOTE_CARD
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  conversation   Conversation @relation(fields: [conversationId], references: [id])
+  conversationId String
+  direction      MsgDir
+  sender         MsgSender
+  type           MsgType
+  text           String?
+  mediaJson      Json?
+  meta           Json?
+  createdAt      DateTime     @default(now())
+
+  @@index([conversationId, createdAt])
+}
+
+enum InquiryStatus {
+  OPEN
+  RECOMMENDED
+  QUOTED
+  CLOSED
+}
+
+model Inquiry {
+  id             String        @id @default(cuid())
+  conversation   Conversation  @relation(fields: [conversationId], references: [id])
+  conversationId String
+  rawText        String
+  category       String?
+  attrs          Json          @default("{}")
+  refImages      String[]      @default([])
+  status         InquiryStatus @default(OPEN)
+  candidates     Candidate[]
+  createdAt      DateTime      @default(now())
+}
+
+model Candidate {
+  id                String          @id @default(cuid())
+  inquiry           Inquiry         @relation(fields: [inquiryId], references: [id])
+  inquiryId         String
+  supplierProduct   SupplierProduct @relation(fields: [supplierProductId], references: [id])
+  supplierProductId String
+  score             Float           @default(0)
+  selected          Boolean         @default(false)
+  groupImages       String[]        @default([])
+  createdAt         DateTime        @default(now())
+}
+
+model Supplier {
+  id             String            @id @default(cuid())
+  account        Account           @relation(fields: [accountId], references: [id])
+  accountId      String
+  connectorKey   String
+  name           String
+  credentialsEnc String
+  config         Json              @default("{}")
+  products       SupplierProduct[]
+  createdAt      DateTime          @default(now())
+}
+
+model SupplierProduct {
+  id           String      @id @default(cuid())
+  supplier     Supplier    @relation(fields: [supplierId], references: [id])
+  supplierId   String
+  externalId   String
+  title        String
+  mainImage    String
+  images       String[]    @default([])
+  category     String?
+  attrs        Json        @default("{}")
+  skus         Json        @default("[]")
+  minPrice     Decimal
+  weightGrams  Int?
+  rawJson      Json?
+  lastSyncedAt DateTime    @default(now())
+  candidates   Candidate[]
+
+  @@unique([supplierId, externalId])
+  @@index([category])
+}
+
+model PricingStrategy {
+  id        String   @id @default(cuid())
+  account   Account  @relation(fields: [accountId], references: [id])
+  accountId String
+  name      String
+  rulesJson Json
+  isDefault Boolean  @default(false)
+  quotes    Quote[]
+  createdAt DateTime @default(now())
+}
+
+enum QuoteStatus {
+  DRAFT
+  SENT
+  ACCEPTED
+  COUNTERED
+  EXPIRED
+  REJECTED
+}
+
+model Quote {
+  id             String          @id @default(cuid())
+  conversation   Conversation    @relation(fields: [conversationId], references: [id])
+  conversationId String
+  strategy       PricingStrategy @relation(fields: [strategyId], references: [id])
+  strategyId     String
+  items          Json
+  total          Decimal
+  currency       String
+  validUntil     DateTime
+  status         QuoteStatus     @default(DRAFT)
+  orders         Order[]
+  createdAt      DateTime        @default(now())
+}
+
+enum OrderStatus {
+  PENDING
+  PAID
+  SUPPLIER_PLACED
+  SHIPPED
+  DELIVERED
+  CANCELLED
+}
+
+model Order {
+  id                      String       @id @default(cuid())
+  conversation            Conversation @relation(fields: [conversationId], references: [id])
+  conversationId          String
+  quote                   Quote        @relation(fields: [quoteId], references: [id])
+  quoteId                 String
+  externalSupplierOrderId String?
+  shipping                Json
+  status                  OrderStatus  @default(PENDING)
+  tracking                Tracking?
+  createdAt               DateTime     @default(now())
+}
+
+model Tracking {
+  id              String   @id @default(cuid())
+  order           Order    @relation(fields: [orderId], references: [id])
+  orderId         String   @unique
+  carrier         String
+  trackingNo      String
+  labelTrackerId  String?
+  lastEvent       Json?
+  events          Json     @default("[]")
+  updatedAt       DateTime @updatedAt
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  actor     String
+  action    String
+  target    String
+  diff      Json?
+  createdAt DateTime @default(now())
+}
