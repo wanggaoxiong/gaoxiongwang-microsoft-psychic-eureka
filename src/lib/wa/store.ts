@@ -149,6 +149,59 @@ function outgoingFuzzyKey(m: WaMessage): string | null {
   return `${m.type}|${body}`;
 }
 
+function mergeConversationFields(target: WaConversation, source: WaConversation): void {
+  target.unread = (target.unread ?? 0) + (source.unread ?? 0);
+  if ((source.lastTimestamp ?? 0) > (target.lastTimestamp ?? 0)) {
+    target.lastTimestamp = source.lastTimestamp;
+    target.lastMessage = source.lastMessage;
+  }
+  if (!target.name && source.name) target.name = source.name;
+  target.pinned = target.pinned || source.pinned || undefined;
+  if (!target.outputLang && source.outputLang) target.outputLang = source.outputLang;
+  if (!target.autoMode && source.autoMode) target.autoMode = source.autoMode;
+  if (!target.aiDraft && source.aiDraft) target.aiDraft = source.aiDraft;
+  const stageRank: Record<NonNullable<WaConversation['salesStage']>, number> = {
+    S1: 1,
+    S2: 2,
+    S3: 3,
+    S4: 4,
+    S5: 5,
+    S6: 6,
+    S7: 7
+  };
+  if (
+    source.salesStage &&
+    (!target.salesStage || stageRank[source.salesStage] >= stageRank[target.salesStage])
+  ) {
+    target.salesStage = source.salesStage;
+    target.salesStageAt = Math.max(target.salesStageAt ?? 0, source.salesStageAt ?? 0) || undefined;
+  }
+  target.slots = { ...(source.slots ?? {}), ...(target.slots ?? {}) };
+  const tempRank = { cold: 1, warm: 2, hot: 3 } as const;
+  if (
+    source.leadTemperature &&
+    (!target.leadTemperature || tempRank[source.leadTemperature] > tempRank[target.leadTemperature])
+  ) {
+    target.leadTemperature = source.leadTemperature;
+  }
+  if (source.lastSentProductIds?.length) {
+    const seen = new Map<string, { id: string; ts: number }>();
+    for (const it of [...(target.lastSentProductIds ?? []), ...source.lastSentProductIds]) {
+      const prev = seen.get(it.id);
+      if (!prev || it.ts > prev.ts) seen.set(it.id, it);
+    }
+    target.lastSentProductIds = Array.from(seen.values()).sort((a, b) => b.ts - a.ts).slice(0, 50);
+  }
+  if (!target.lastNudgedOutboundId && source.lastNudgedOutboundId) {
+    target.lastNudgedOutboundId = source.lastNudgedOutboundId;
+  }
+  if (source.needsHuman) {
+    target.needsHuman = true;
+    target.needsHumanReason = target.needsHumanReason ?? source.needsHumanReason;
+    target.needsHumanAt = Math.max(target.needsHumanAt ?? 0, source.needsHumanAt ?? 0) || source.needsHumanAt;
+  }
+}
+
 function isLocalOutId(id: string): boolean {
   return id.startsWith('out_');
 }
@@ -226,12 +279,7 @@ function normalizeByAliases(store: Store): Store {
       conversations[canonicalId] = { ...c, id: canonicalId };
       continue;
     }
-    prev.unread = (prev.unread ?? 0) + (c.unread ?? 0);
-    if ((c.lastTimestamp ?? 0) > (prev.lastTimestamp ?? 0)) {
-      prev.lastTimestamp = c.lastTimestamp;
-      prev.lastMessage = c.lastMessage;
-    }
-    if (!prev.name && c.name) prev.name = c.name;
+    mergeConversationFields(prev, c);
   }
 
   // 防止没有 conversations 条目的历史消息被“隐藏”。
@@ -418,8 +466,9 @@ function isSystemAccountId(id: string): boolean {
 
 export async function getMessages(conversationId: string, limit = 1000): Promise<WaMessage[]> {
   const store = await ensureFile();
+  const canonical = resolveAlias(conversationId);
   const rows = store.messages
-    .filter((m) => m.conversationId === conversationId)
+    .filter((m) => m.conversationId === canonical)
     .sort((a, b) => a.timestamp - b.timestamp);
   // 兜底去重：历史上若同一条消息被 appendOutgoing + 回灌各写了一份
   // （waMessageId 相同但 id 不同），读取时按 waMessageId 折叠成一条，优先保留
@@ -438,7 +487,7 @@ export async function getMessages(conversationId: string, limit = 1000): Promise
 
 export async function markRead(conversationId: string): Promise<void> {
   await enqueue((store) => {
-    const c = store.conversations[conversationId];
+    const c = store.conversations[resolveAlias(conversationId)];
     if (c) c.unread = 0;
   });
 }
@@ -934,27 +983,30 @@ export async function setConversationDraft(
  */
 export async function mergeConversations(fromId: string, toId: string): Promise<void> {
   if (fromId === toId) return;
-  // 持久化别名：fromId -> toId（永久），下次同一对端再来消息会自动落到 toId
-  await addAlias(fromId, toId);
+  let aliasFrom = fromId;
+  let aliasTo = toId;
   await enqueue((store) => {
-    const from = store.conversations[fromId];
-    const to = store.conversations[toId];
+    const canonicalFrom = resolveAlias(fromId);
+    const canonicalTo = resolveAlias(toId);
+    if (canonicalFrom === canonicalTo) return;
+    aliasFrom = canonicalFrom;
+    aliasTo = canonicalTo;
+    const from = store.conversations[canonicalFrom];
+    const to = store.conversations[canonicalTo];
     if (!from) return;
     // 迁移消息
     for (const m of store.messages) {
-      if (m.conversationId === fromId) m.conversationId = toId;
+      if (m.conversationId === canonicalFrom) m.conversationId = canonicalTo;
     }
     if (!to) {
       // 目标不存在：把 from 改名为 toId
-      store.conversations[toId] = { ...from, id: toId };
+      store.conversations[canonicalTo] = { ...from, id: canonicalTo };
     } else {
-      to.unread = (to.unread ?? 0) + (from.unread ?? 0);
-      if ((from.lastTimestamp ?? 0) > (to.lastTimestamp ?? 0)) {
-        to.lastTimestamp = from.lastTimestamp;
-        to.lastMessage = from.lastMessage;
-      }
-      if (!to.name && from.name) to.name = from.name;
+      mergeConversationFields(to, from);
     }
-    delete store.conversations[fromId];
+    delete store.conversations[canonicalFrom];
   });
+  // 持久化别名：fromId -> toId（永久），下次同一对端再来消息会自动落到 toId
+  await addAlias(aliasFrom, aliasTo);
+  if (aliasFrom !== fromId || aliasTo !== toId) await addAlias(fromId, toId);
 }

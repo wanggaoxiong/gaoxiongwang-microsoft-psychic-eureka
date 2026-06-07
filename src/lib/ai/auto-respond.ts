@@ -305,9 +305,11 @@ function isMultiQuestion(text: string): boolean {
 }
 
 /**
- * 报价前置条件：金牌销售逻辑「先确定款式/尺码/颜色，再谈价格」。
- * 鞋 / 服饰类必须先有尺码（颜色也要确认）；包类先确认颜色。返回还缺的关键属性中文名数组。
- * convText 取最近若干条客户消息合并文本，prior slots 里已有颜色则视为已确认颜色。
+ * 报价前置条件：金牌销售逻辑「先把下单必需的关键信息确认齐，再谈价格」。
+ * - 鞋 / 服饰类：尺码是下单刚需，必须先确认；尺码确认前再软性确认一次颜色。
+ * - 包 / 表等无尺码概念的：客户看中的就是图上那只，颜色=图片色，绝不反复追问颜色。
+ * - 客户明确说「按图片同款 / 一样 / as shown / exact」时，颜色视为已确认。
+ * 返回还缺的关键属性中文名数组（为空表示可以直接进入报价承接）。
  */
 function missingQuotePrereqs(
   category: string | undefined,
@@ -319,13 +321,45 @@ function missingQuotePrereqs(
     /(\b(3[5-9]|4[0-6])\b|us\s*\d|uk\s*\d|eu\s*\d|码|尺码|\bsize\b\s*\d|s\/m\/l|均码|大码|小码|\b[smlx]+\b\s*(码)?)/i.test(
       t
     );
+  const wantsExactShown =
+    /(图(片|上)|照片|原色|同款|一样|same as|as shown|in the (picture|photo)|like the (pic|photo|picture)|exact)/i.test(
+      t
+    );
   const colorKnown =
-    !!slots.colorPref || /(黑|白|棕|米|裸|红|蓝|灰|粉|金|银|绿|紫|black|white|brown|beige|red|blue|grey|gray|pink|navy)/i.test(t);
+    !!slots.colorPref ||
+    wantsExactShown ||
+    /(黑|白|棕|米|裸|红|蓝|灰|粉|金|银|绿|紫|black|white|brown|beige|red|blue|grey|gray|pink|navy)/i.test(t);
   const missing: string[] = [];
   const needsSize = category === '鞋' || category === '上装' || category === '下装' || category === '裙';
   if (needsSize && !sizeMentioned) missing.push('尺码');
-  if (!colorKnown) missing.push('颜色');
+  // 颜色只对「有尺码概念」的服饰/鞋类做软校验；包/表等看的就是图上那只，颜色即图片色，不追问。
+  if (needsSize && !colorKnown) missing.push('颜色');
   return missing;
+}
+
+function isAffirmativeShortReply(text: string | undefined): boolean {
+  return /^(yes|yeah|yep|ok|okay|sure|confirm|confirmed|right|correct|对|是|嗯|好|可以|确认|没错|就这个|就这款)[.!。！\s]*$/i.test(
+    (text || '').trim()
+  );
+}
+
+function filterConfirmedQuotePrereqs(missing: string[], recent: WaMessage[]): string[] {
+  if (!missing.length) return missing;
+  const lastInbound = [...recent].reverse().find((m) => m.direction === 'in' && !!m.text);
+  if (!lastInbound || !isAffirmativeShortReply(lastInbound.text)) return missing;
+  const prevOutbound = [...recent]
+    .reverse()
+    .find((m) => m.direction === 'out' && !!m.text && (m.timestamp ?? 0) < (lastInbound.timestamp ?? 0));
+  const prev = prevOutbound?.text || '';
+  return missing.filter((item) => {
+    if (item === '颜色' && /(颜色|配色|color|natural leather|black|white|brown|beige|red|blue|gray|grey|pink)/i.test(prev)) {
+      return false;
+    }
+    if (item === '尺码' && /(尺码|码数|size|\bus\b|\buk\b|\beu\b)/i.test(prev)) {
+      return false;
+    }
+    return true;
+  });
 }
 
 /**
@@ -552,7 +586,9 @@ const BURST_DEBOUNCE_MS = (() => {
 })();
 
 /**
- * S5 报价转人工：进入报价环节后自动暂停本会话 AI 的时长（毫秒），等人工核价出 PI。
+ * 自动转人工冷却时长（毫秒）：自动识别到报价(S5)/物流发货(S6)/成交付款(S7)阶段后，
+ * 自动暂停本会话 AI 自动发送的时长，等人工核价/出 PI/安排发货。
+ * 注意：这是「自动识别」触发的冷却，与 Inbox 里「暂停本会话 60 分钟」手动按钮相互独立。
  * 默认 30 分钟，可用 AI_S5_HANDOFF_MIN 覆盖（分钟）。
  */
 const S5_HANDOFF_PAUSE_MS = (() => {
@@ -1114,7 +1150,10 @@ async function runAutoRespond(conversationId: string): Promise<void> {
         );
         const hasRegion = !!detectRegionFromText(convoText);
         const lastInbound = [...recentForDecide].reverse().find((m) => m.direction === 'in' && !!m.text)?.text || '';
-        const gatherFirst = missingQuotePrereqs(mergedSlots.category, convoText, mergedSlots);
+        const gatherFirst = filterConfirmedQuotePrereqs(
+          missingQuotePrereqs(mergedSlots.category, convoText, mergedSlots),
+          recentForDecide
+        );
         quoteContext = {
           productTitle: refProduct?.title,
           productBrand:
@@ -1294,9 +1333,9 @@ async function runAutoRespond(conversationId: string): Promise<void> {
     // 决策依据：catalog 多为成本价且缺重量，AI 无法可靠自动报价；报价不可逆、且奢侈品 B2B
     // 客户在价格环节本就期待真人。AI 负责"秒接住 + 收齐数量/目的地 + 承诺很快给最优价"
     // 防止客户因等待流失；真实数字/PI 由人工核发。
-    // 注意：若关键属性（尺码/颜色）还没确认（gatherFirst 非空），说明还没到真正报价那一步——
-    // 本轮 AI 只是在收前置信息，绝不在此时移交人工/暂停，等属性齐了客户再问价才移交。
-    if (mode === 'AUTO_FULL' && sendResult.ok && quoteContext && !quoteContext.gatherFirst?.length) {
+    // 一旦客户进入报价环节就亮灯给人工：即便颜色/尺码还没齐，员工也应该看到这条潜在订单，
+    // AI 本轮只负责接住和补问，正式价格/PI 仍由人工核发。
+    if (mode === 'AUTO_FULL' && sendResult.ok && quoteContext) {
       try {
         // 自动匹配报价策略：按地区/品牌/数量挑最贴合的一套，告诉人工"建议用哪套策略报价"。
         let strategyHint = '';
@@ -1322,7 +1361,9 @@ async function runAutoRespond(conversationId: string): Promise<void> {
         await patchConversationSalesState(canonical, {
           leadTemperature: 'hot',
           needsHuman: true,
-          needsHumanReason: `S5 报价：需人工核价/出 PI ${strategyHint}`.trim()
+          needsHumanReason: quoteContext.gatherFirst?.length
+            ? `S5 报价：客户已问价，待确认${quoteContext.gatherFirst.join('、')}后人工核价/出 PI ${strategyHint}`.trim()
+            : `S5 报价：需人工核价/出 PI ${strategyHint}`.trim()
         });
         await logAiAction({
           conversationId: canonical,
@@ -1337,6 +1378,31 @@ async function runAutoRespond(conversationId: string): Promise<void> {
         console.log('[auto-respond] S5 handoff: paused + needsHuman', { canonical, strategyHint });
       } catch (e) {
         console.error('[auto-respond] S5 handoff failed', e);
+      }
+    }
+
+    // 物流/发货也必须亮灯：运费、交期、承运商、跟踪号都依赖真实订单/线路数据，AI 只能接住，不能承诺。
+    if (mode === 'AUTO_FULL' && sendResult.ok && nextStage === 'S6') {
+      try {
+        await pauseConversationAutopilot(canonical, S5_HANDOFF_PAUSE_MS);
+        await patchConversationSalesState(canonical, {
+          leadTemperature: 'hot',
+          needsHuman: true,
+          needsHumanReason: 'S6 物流/发货：需人工核实运费、交期、承运商或跟踪号'
+        });
+        await logAiAction({
+          conversationId: canonical,
+          source,
+          mode,
+          outcome: 'downgraded',
+          reason: `进入物流/发货(S6)：已暂停自动发送 ${Math.round(
+            S5_HANDOFF_PAUSE_MS / 60000
+          )} 分钟，等待人工核实物流信息`,
+          textPreview: reply.text
+        });
+        console.log('[auto-respond] S6 handoff: paused + needsHuman', { canonical });
+      } catch (e) {
+        console.error('[auto-respond] S6 handoff failed', e);
       }
     }
 

@@ -15,6 +15,7 @@
 import 'server-only';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { resolveAlias, warmAliases } from '@/lib/wa/alias-map';
 
 /* ============================ 类型 ============================ */
 
@@ -103,6 +104,7 @@ const DEFAULT_STATE: AutopilotState = {
 let writeQueue: Promise<void> = Promise.resolve();
 
 async function readState(): Promise<AutopilotState> {
+  await warmAliases();
   try {
     const raw = await fs.readFile(STATE_FILE, 'utf8');
     const parsed = JSON.parse(raw) as Partial<AutopilotState>;
@@ -110,12 +112,23 @@ async function readState(): Promise<AutopilotState> {
       killSwitch: !!parsed.killSwitch,
       killSwitchAt: parsed.killSwitchAt,
       defaultMode: (parsed.defaultMode as AutoMode) ?? 'SUGGEST',
-      pausedUntil: parsed.pausedUntil ?? {}
+      pausedUntil: canonicalizePausedUntil(parsed.pausedUntil ?? {})
     };
   } catch (e: unknown) {
     if ((e as NodeJS.ErrnoException)?.code === 'ENOENT') return { ...DEFAULT_STATE };
     throw e;
   }
+}
+
+function canonicalizePausedUntil(pausedUntil: Record<string, number>): Record<string, number> {
+  const now = Date.now();
+  const next: Record<string, number> = {};
+  for (const [id, until] of Object.entries(pausedUntil)) {
+    if (!until || until <= now) continue;
+    const canonical = resolveAlias(id);
+    next[canonical] = Math.max(next[canonical] ?? 0, until);
+  }
+  return next;
 }
 
 async function writeState(next: AutopilotState): Promise<void> {
@@ -161,14 +174,15 @@ export async function pauseConversationAutopilot(
   ms: number
 ): Promise<AutopilotState> {
   return enqueueState((s) => {
-    if (ms <= 0) delete s.pausedUntil[conversationId];
-    else s.pausedUntil[conversationId] = Date.now() + ms;
+    const canonical = resolveAlias(conversationId);
+    if (ms <= 0) delete s.pausedUntil[canonical];
+    else s.pausedUntil[canonical] = Date.now() + ms;
     return s;
   });
 }
 
 export function isConversationPaused(state: AutopilotState, conversationId: string): boolean {
-  const until = state.pausedUntil[conversationId];
+  const until = state.pausedUntil[resolveAlias(conversationId)];
   return !!until && until > Date.now();
 }
 
@@ -263,7 +277,7 @@ export async function autopilotGate(input: GateInput): Promise<GateDecision> {
   // 会话级暂停
   if (isConversationPaused(state, input.conversationId)) {
     const minutesLeft = Math.ceil(
-      (state.pausedUntil[input.conversationId]! - Date.now()) / 60000
+      (state.pausedUntil[resolveAlias(input.conversationId)]! - Date.now()) / 60000
     );
     return {
       allow: false,
