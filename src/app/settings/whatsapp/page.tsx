@@ -94,6 +94,7 @@ type PersonalStatus = {
   session?: {
     profileId: string;
     hasSession: boolean;
+    invalid?: boolean;
     dir: string;
   };
   proxy?: {
@@ -466,7 +467,11 @@ function PersonalPanel() {
             </p>
             {status?.session ? (
               <p className="mt-1 text-[11px] text-zinc-400">
-                当前 profile: {status.session.profileId} · {status.session.hasSession ? '已保存登录，可尝试免扫码恢复' : '暂无本地登录，下次会显示二维码'} · {status.session.dir}
+                当前 profile: {status.session.profileId} · {status.session.hasSession
+                  ? status.session.invalid
+                    ? '本地登录已保存但已失效，需要重新扫码'
+                    : '已保存登录，可尝试免扫码恢复'
+                  : '暂无本地登录，下次会显示二维码'} · {status.session.dir}
               </p>
             ) : null}
           </div>
@@ -495,6 +500,12 @@ function PersonalPanel() {
               <p className="text-center text-xs text-zinc-500">
                 打开 WhatsApp → 设置 → 已连接的设备 → 连接设备 → 扫描此码
               </p>
+              {status.session?.invalid ? (
+                <p className="max-w-md text-center text-[11px] text-red-600">
+                  检测到本地 session 文件仍在，但 WhatsApp Web 没有接受这份登录态。
+                  这通常表示手机端已删除/失效了该已连接设备，或上次浏览器异常退出导致本地登录态损坏；需要重新扫码一次。
+                </p>
+              ) : null}
               <p className="max-w-xs text-center text-[11px] text-amber-700">
                 若手机提示「无法关联设备」，通常是已连接设备已满（每个账号最多 4 个）。
                 请先在手机 WhatsApp → 已连接的设备 中删除旧/失效的设备，再回来重新扫码。

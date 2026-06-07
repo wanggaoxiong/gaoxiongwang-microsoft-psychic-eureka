@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { Button, Input, Badge, Empty, Card } from '@/lib/ui/primitives';
@@ -80,6 +80,14 @@ const AUTO_MODE_ITEMS: Array<{ value: AutoMode; label: string; short: string }> 
 ];
 
 export default function InboxPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-[#F7F8FB]" />}>
+      <InboxPageContent />
+    </Suspense>
+  );
+}
+
+function InboxPageContent() {
   const search = useSearchParams();
   const [waConfig, setWaConfig] = useState<WaConfig | null>(null);
   const [autopilot, setAutopilot] = useState<{
@@ -558,16 +566,26 @@ export default function InboxPage() {
   }, [refreshAutopilotState]);
 
   // 拉当前会话消息，3s 轮询
+  const refreshMessages = useCallback(async (conversationId: string) => {
+    try {
+      const res = await fetch(`/api/wa/conversations/${conversationId}`);
+      if (!res.ok) return;
+      const json = await res.json();
+      setMessages(json.messages ?? []);
+    } catch {
+      // Network blips are expected when testing against a remote dev server; keep the current messages.
+    }
+  }, []);
+
   useEffect(() => {
     if (!activeId) {
       setMessages([]);
       return;
     }
+    const conversationId = activeId;
     let cancelled = false;
     async function load() {
-      const res = await fetch(`/api/wa/conversations/${activeId}`);
-      const json = await res.json();
-      if (!cancelled) setMessages(json.messages ?? []);
+      if (!cancelled) await refreshMessages(conversationId);
     }
     load();
     const t = setInterval(load, 3000);
@@ -575,7 +593,7 @@ export default function InboxPage() {
       cancelled = true;
       clearInterval(t);
     };
-  }, [activeId]);
+  }, [activeId, refreshMessages]);
 
   // auto-scroll
   useEffect(() => {
@@ -635,9 +653,7 @@ export default function InboxPage() {
         setSendError(json.reason || `HTTP ${res.status}`);
       }
       // 立刻刷新一次
-      const m = await fetch(`/api/wa/conversations/${activeId}`);
-      const j = await m.json();
-      setMessages(j.messages ?? []);
+      await refreshMessages(activeId);
       refreshConversations();
     } catch (e: unknown) {
       setSendError(e instanceof Error ? e.message : String(e));
@@ -678,8 +694,7 @@ export default function InboxPage() {
     } catch (e) {
       setSendError(e instanceof Error ? e.message : String(e));
     } finally {
-      const j = await fetch(`/api/wa/conversations/${activeId}`).then((r) => r.json());
-      setMessages(j.messages ?? []);
+      await refreshMessages(activeId);
       refreshConversations();
     }
   }
@@ -715,8 +730,7 @@ export default function InboxPage() {
     } catch (e) {
       setSendError(e instanceof Error ? e.message : String(e));
     } finally {
-      const j = await fetch(`/api/wa/conversations/${activeId}`).then((r) => r.json());
-      setMessages(j.messages ?? []);
+      await refreshMessages(activeId);
     }
   }
 

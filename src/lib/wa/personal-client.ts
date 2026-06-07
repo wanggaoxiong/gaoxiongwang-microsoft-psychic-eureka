@@ -182,6 +182,10 @@ function normalizeStartupError(message: string): string {
   const msg = message || 'unknown error';
   const m = msg.toLowerCase();
 
+  if (m.includes('max qrcode retries reached')) {
+    return '本地 WhatsApp 登录 session 存在，但 WhatsApp Web 已判定登录态失效，二维码刷新次数已达上限。通常是手机端删除了该已连接设备、账号被 WhatsApp 重新验证、或本地浏览器 profile 曾异常退出导致 session 损坏；需要重新扫码一次。';
+  }
+
   // 1) 明确的网络/导航错误：通常是代理或出口网络不通
   const isNavError =
     m.includes('err_connection_reset') ||
@@ -214,6 +218,19 @@ function normalizeStartupError(message: string): string {
     return `当前 Chromium 无法访问 WhatsApp Web。${envHint} 原始错误: ${msg}`;
   }
   return msg;
+}
+
+function isSavedSessionInvalid(state: PersonalState, lastError: string | null, hasSession: boolean): boolean {
+  if (!hasSession) return false;
+  if (state !== 'qr' && state !== 'auth_failure' && state !== 'disconnected') return false;
+  const msg = (lastError || '').toLowerCase();
+  return (
+    state === 'qr' ||
+    msg.includes('登录态失效') ||
+    msg.includes('max qrcode retries reached') ||
+    msg.includes('session') ||
+    msg.includes('auth')
+  );
 }
 
 /**
@@ -1112,6 +1129,7 @@ export function getPersonalStatus() {
   const h = holder();
   const profileId = getActiveProfileIdSyncSafe();
   const sessionDir = getProfileSessionDir(profileId);
+  const hasSession = existsSync(sessionDir);
   return {
     state: h.state,
     qr: h.qrDataUrl,
@@ -1120,7 +1138,8 @@ export function getPersonalStatus() {
     startedAt: h.startedAt,
     session: {
       profileId,
-      hasSession: existsSync(sessionDir),
+      hasSession,
+      invalid: isSavedSessionInvalid(h.state, h.lastError, hasSession),
       dir: path.relative(process.cwd(), sessionDir)
     },
     backfill: h.backfill,
